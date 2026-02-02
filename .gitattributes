@@ -2,3 +2,7 @@
 *.pt filter=lfs diff=lfs merge=lfs -text
 *.bin filter=lfs diff=lfs merge=lfs -text
 *.pth filter=lfs diff=lfs merge=lfs -text
+
+# 方案 A：完全禁用转换（将所有文件视为二进制，不做行尾处理）
+# 适合你想“原样保留”所有文件的情况
+* -text
