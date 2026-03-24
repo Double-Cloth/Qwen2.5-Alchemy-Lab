@@ -1,7 +1,9 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-import sys
+import argparse
+import os
+from contextlib import nullcontext
 
 # =================配置区域=================
 BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -20,7 +22,19 @@ class Colors:
     RESET = '\033[0m'
 
 
-def generate_response(model, tokenizer, prompt):
+def parse_args():
+    parser = argparse.ArgumentParser(description="Compare base model and LoRA model outputs")
+    parser.add_argument("--model_name", type=str, default=BASE_MODEL, help="基础模型名称")
+    parser.add_argument("--lora_path", type=str, default=LORA_PATH, help="LoRA 目录")
+    parser.add_argument("--cache_dir", type=str, default=CACHE_DIR, help="模型缓存目录")
+    parser.add_argument("--max_new_tokens", type=int, default=256, help="最大生成 token")
+    parser.add_argument("--temperature", type=float, default=0.7, help="采样温度")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p 采样")
+    parser.add_argument("--repetition_penalty", type=float, default=1.1, help="重复惩罚")
+    return parser.parse_args()
+
+
+def generate_response(model, tokenizer, prompt, args):
     # Qwen 推荐的 System Prompt
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -32,11 +46,11 @@ def generate_response(model, tokenizer, prompt):
     with torch.no_grad():
         generated_ids = model.generate(
             **inputs,
-            max_new_tokens=256,
-            temperature=0.7,  # 稍微降低一点随机性，让对比更稳定
-            top_p=0.9,
-            repetition_penalty=1.1,  # 避免复读机
-            do_sample=True,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
+            do_sample=args.temperature > 0,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id
         )
@@ -49,20 +63,38 @@ def generate_response(model, tokenizer, prompt):
 
 
 def main():
-    print(f"{Colors.HEADER}⏳ 正在加载基础模型: {BASE_MODEL}...{Colors.RESET}")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, cache_dir=CACHE_DIR)
+    args = parse_args()
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    device_map = "auto" if torch.cuda.is_available() else None
+
+    print(f"{Colors.HEADER}⏳ 正在加载基础模型: {args.model_name}...{Colors.RESET}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir, trust_remote_code=True)
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # 1. 先加载 Base Model
     base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        cache_dir=CACHE_DIR,
-        torch_dtype=torch.float16,
-        device_map="auto"
+        args.model_name,
+        cache_dir=args.cache_dir,
+        torch_dtype=dtype,
+        device_map=device_map,
+        trust_remote_code=True
     )
 
     print(f"{Colors.HEADER}🔧 正在挂载 LoRA 适配器...{Colors.RESET}")
-    # 2. 挂载 LoRA，但这会直接修改 base_model
-    model = PeftModel.from_pretrained(base_model, LORA_PATH)
+    # 2. 尝试挂载 LoRA
+    has_lora = False
+    model = base_model
+    if os.path.exists(args.lora_path):
+        try:
+            model = PeftModel.from_pretrained(base_model, args.lora_path)
+            has_lora = True
+        except Exception as e:
+            print(f"{Colors.RED}⚠️ LoRA 加载失败：{e}，将仅展示 Base 输出。{Colors.RESET}")
+    else:
+        print(f"{Colors.RED}⚠️ 未发现 LoRA 目录：{args.lora_path}，将仅展示 Base 输出。{Colors.RESET}")
 
     print("\n✅ 模型准备就绪！开始对比测试...\n")
 
@@ -101,18 +133,19 @@ def main():
 
         # --- A. 测试 原版模型 (Base) ---
         # 使用 disable_adapter() 上下文管理器，暂时“关掉”LoRA
-        with model.disable_adapter():
+        with (model.disable_adapter() if hasattr(model, "disable_adapter") else nullcontext()):
             print(f"{Colors.GREEN}🟢 [Base Model (Qwen2.5)] 思考中...{Colors.RESET}")
-            base_ans = generate_response(model, tokenizer, prompt)
+            base_ans = generate_response(model, tokenizer, prompt, args)
             print(f"{Colors.GREEN}{base_ans}{Colors.RESET}")
 
-        print("-" * 30 + " VS " + "-" * 30)
+        if has_lora:
+            print("-" * 30 + " VS " + "-" * 30)
 
-        # --- B. 测试 微调模型 (LoRA) ---
-        # 上下文管理器结束，LoRA 自动重新生效
-        print(f"{Colors.RED}🔴 [LoRA Model (Alpaca-Tuned)] 思考中...{Colors.RESET}")
-        lora_ans = generate_response(model, tokenizer, prompt)
-        print(f"{Colors.RED}{lora_ans}{Colors.RESET}")
+            # --- B. 测试 微调模型 (LoRA) ---
+            # 上下文管理器结束，LoRA 自动重新生效
+            print(f"{Colors.RED}🔴 [LoRA Model (Alpaca-Tuned)] 思考中...{Colors.RESET}")
+            lora_ans = generate_response(model, tokenizer, prompt, args)
+            print(f"{Colors.RED}{lora_ans}{Colors.RESET}")
 
         print("\n" + "." * 70 + "\n")
 

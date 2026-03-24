@@ -1,8 +1,9 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-import sys
 import os
+import argparse
+from contextlib import nullcontext
 
 # ==========================
 # ⚙️ 配置路径
@@ -23,30 +24,49 @@ class Colors:
     RESET = '\033[0m'
 
 
-def load_model():
-    print(f"{Colors.SYS}⏳ 正在加载基础模型: {BASE_MODEL_NAME} ...{Colors.RESET}")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Qwen + LoRA interactive inference")
+    parser.add_argument("--model_name", type=str, default=BASE_MODEL_NAME, help="基础模型名称")
+    parser.add_argument("--lora_path", type=str, default=LORA_PATH, help="LoRA 目录")
+    parser.add_argument("--cache_dir", type=str, default=CACHE_DIR, help="模型缓存目录")
+    parser.add_argument("--max_new_tokens", type=int, default=512, help="最大生成 token 数")
+    parser.add_argument("--temperature", type=float, default=0.7, help="生成温度")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p 采样")
+    parser.add_argument("--repetition_penalty", type=float, default=1.1, help="重复惩罚")
+    return parser.parse_args()
+
+
+def load_model(args):
+    print(f"{Colors.SYS}⏳ 正在加载基础模型: {args.model_name} ...{Colors.RESET}")
+
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    device_map = "auto" if torch.cuda.is_available() else None
 
     tokenizer = AutoTokenizer.from_pretrained(
-        BASE_MODEL_NAME,
-        cache_dir=CACHE_DIR,
+        args.model_name,
+        cache_dir=args.cache_dir,
         trust_remote_code=True
     )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_NAME,
-        cache_dir=CACHE_DIR,
-        torch_dtype=torch.float16,
-        device_map="auto",
+        args.model_name,
+        cache_dir=args.cache_dir,
+        torch_dtype=dtype,
+        device_map=device_map,
         trust_remote_code=True
     )
 
-    print(f"{Colors.SYS}🔗 正在挂载 LoRA 适配器: {LORA_PATH} ...{Colors.RESET}")
+    print(f"{Colors.SYS}🔗 正在挂载 LoRA 适配器: {args.lora_path} ...{Colors.RESET}")
 
     has_lora = False
-    if os.path.exists(LORA_PATH):
+    if os.path.exists(args.lora_path):
         try:
             # 加载 LoRA 模型
-            model = PeftModel.from_pretrained(base_model, LORA_PATH)
+            model = PeftModel.from_pretrained(base_model, args.lora_path)
             has_lora = True
             print(f"✅ LoRA 加载成功！")
         except Exception as e:
@@ -59,7 +79,7 @@ def load_model():
     return model, tokenizer, has_lora
 
 
-def generate_answer(model, tokenizer, query, use_lora):
+def generate_answer(model, tokenizer, query, use_lora, args):
     """
     统一生成函数，根据 use_lora 决定是否启用适配器
     """
@@ -76,15 +96,15 @@ def generate_answer(model, tokenizer, query, use_lora):
 
     inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
-    # 核心逻辑：根据开关决定是否使用 LoRA
-    # model.disable_adapter() 是上下文管理器，在此缩进块内 LoRA 失效
-    if use_lora:
-        # LoRA 模式（PeftModel 默认就是启用的）
-        context = torch.no_grad()  # 空的上下文，不起特殊作用
+    has_adapter_toggle = hasattr(model, "disable_adapter")
+    if use_lora and has_adapter_toggle:
+        context = nullcontext()
         mode_name = f"{Colors.LORA}[LoRA微调版]{Colors.RESET}"
-    else:
-        # Base 模式（强制关闭 LoRA）
+    elif (not use_lora) and has_adapter_toggle:
         context = model.disable_adapter()
+        mode_name = f"{Colors.BASE}[Base原版]{Colors.RESET}"
+    else:
+        context = nullcontext()
         mode_name = f"{Colors.BASE}[Base原版]{Colors.RESET}"
 
     print(f"{Colors.SYS}⚙️  正在生成 ({mode_name})...{Colors.RESET}")
@@ -92,11 +112,11 @@ def generate_answer(model, tokenizer, query, use_lora):
     with torch.no_grad(), context:
         generated_ids = model.generate(
             **inputs,
-            max_new_tokens=512,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True,
-            repetition_penalty=1.1,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            do_sample=args.temperature > 0,
+            repetition_penalty=args.repetition_penalty,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id
         )
@@ -104,10 +124,10 @@ def generate_answer(model, tokenizer, query, use_lora):
     generated_ids = [
         output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
     ]
-    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
 
-def chat_loop(model, tokenizer, has_lora):
+def chat_loop(model, tokenizer, has_lora, args):
     print("\n" + "=" * 60)
     print("🤖 Qwen-LoRA 交互控制台")
     print(f"👉 输入 {Colors.LORA}/t{Colors.RESET} 或 {Colors.LORA}/toggle{Colors.RESET} 切换 [LoRA] / [Base] 模式")
@@ -163,13 +183,14 @@ def chat_loop(model, tokenizer, has_lora):
             continue
 
         # === 正常生成 ===
-        response = generate_answer(model, tokenizer, query, use_lora=current_mode_lora)
+        response = generate_answer(model, tokenizer, query, use_lora=current_mode_lora, args=args)
 
         color = Colors.LORA if current_mode_lora else Colors.BASE
         print(f"🤖 Assistant: {color}{response}{Colors.RESET}")
 
 
 if __name__ == "__main__":
+    args = parse_args()
     # 加载时返回一个标志位，告诉主循环是否有 LoRA 可用
-    model, tokenizer, has_lora = load_model()
-    chat_loop(model, tokenizer, has_lora)
+    model, tokenizer, has_lora = load_model(args)
+    chat_loop(model, tokenizer, has_lora, args)

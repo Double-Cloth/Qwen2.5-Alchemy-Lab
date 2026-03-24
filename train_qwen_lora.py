@@ -16,8 +16,7 @@ from transformers import (
 from peft import (
     LoraConfig,
     get_peft_model,
-    TaskType,
-    prepare_model_for_kbit_training
+    TaskType
 )
 
 # ==========================================
@@ -48,6 +47,10 @@ def parse_args():
     parser.add_argument("--grad_accum", type=int, default=16, help="梯度累积")
     parser.add_argument("--lr", type=float, default=2e-4, help="LoRA 的学习率")
     parser.add_argument("--max_len", type=int, default=512, help="最大序列长度")
+    parser.add_argument("--eval_size", type=int, default=1000, help="验证集大小")
+    parser.add_argument("--num_proc", type=int, default=1, help="dataset.map 进程数，Windows 建议 1")
+    parser.add_argument("--num_workers", type=int, default=0, help="dataloader workers，Windows 建议 0")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
 
     # 🌀 LoRA 参数
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA Rank")
@@ -59,12 +62,13 @@ def parse_args():
 
 def main():
     args = parse_args()
-    set_seed(42)
+    set_seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"🚀 启动进阶训练流程，使用设备: {device}")
 
-    torch.backends.cuda.matmul.allow_tf32 = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
 
     if not os.path.exists(args.cache_dir):
         os.makedirs(args.cache_dir)
@@ -79,12 +83,15 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    device_map = "auto" if torch.cuda.is_available() else None
+
     # ⚠️ 以半精度加载
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         cache_dir=args.cache_dir,
-        torch_dtype=torch.float16,
-        device_map="auto"
+        torch_dtype=dtype,
+        device_map=device_map
     )
 
     # 🛠️ 关键修改：在这里设置 use_cache = False
@@ -115,8 +122,16 @@ def main():
     # 4. 数据处理 (Qwen ChatML 格式)
     # ==========================================
     logger.info(f"📥 加载并处理数据: {args.data_path}")
-    dataset = load_dataset(args.data_path, split="train", cache_dir=args.cache_dir)
-    dataset = dataset.train_test_split(test_size=1000, seed=42)
+    train_dataset = load_dataset(args.data_path, split="train", cache_dir=args.cache_dir)
+
+    if len(train_dataset) <= 1:
+        raise ValueError("数据集样本过少，至少需要 2 条数据用于训练/验证切分。")
+
+    eval_size = min(args.eval_size, max(1, len(train_dataset) // 10))
+    if eval_size >= len(train_dataset):
+        eval_size = len(train_dataset) - 1
+
+    dataset = train_dataset.train_test_split(test_size=eval_size, seed=args.seed)
 
     def preprocess_function(examples):
         instructions = examples["instruction"]
@@ -156,7 +171,7 @@ def main():
     tokenized_datasets = dataset.map(
         preprocess_function,
         batched=True,
-        num_proc=4,
+        num_proc=max(1, args.num_proc),
         remove_columns=dataset["train"].column_names
     )
 
@@ -165,7 +180,7 @@ def main():
     # ==========================================
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        eval_strategy="steps",
+        evaluation_strategy="steps",
         eval_steps=200,
         save_strategy="steps",
         save_steps=200,
@@ -179,12 +194,12 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=args.epochs,
         weight_decay=0.01,
-        fp16=True,
+        fp16=torch.cuda.is_available(),
 
         logging_dir=f"{args.output_dir}/logs",
         logging_steps=20,
         report_to="tensorboard",
-        dataloader_num_workers=2,
+        dataloader_num_workers=max(0, args.num_workers),
 
         # ❌ 已删除：use_cache=False (它不应该在这里)
     )
