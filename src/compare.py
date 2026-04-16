@@ -3,13 +3,22 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 import argparse
 import os
+from pathlib import Path
 from contextlib import nullcontext
 
 # =================配置区域=================
 BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 # ⚠️ 确保这里的路径是你刚刚训练生成的 checkpoint 文件夹，例如 checkpoint-200 或 final
-LORA_PATH = "./qwen_lora_output"
-CACHE_DIR = "./local_cache"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LORA_PATH = "qwen_lora_output"
+CACHE_DIR = "local_cache"
+
+
+def resolve_project_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
 
 
 # =========================================
@@ -64,6 +73,9 @@ def generate_response(model, tokenizer, prompt, args):
 
 def main():
     args = parse_args()
+    args.cache_dir = str(resolve_project_path(args.cache_dir))
+    args.lora_path = str(resolve_project_path(args.lora_path))
+
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     device_map = "auto" if torch.cuda.is_available() else None
 

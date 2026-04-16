@@ -3,14 +3,23 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 import os
 import argparse
+from pathlib import Path
 from contextlib import nullcontext
 
 # ==========================
 # ⚙️ 配置路径
 # ==========================
 BASE_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-LORA_PATH = "./qwen_lora_output"
-CACHE_DIR = "./local_cache"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LORA_PATH = "qwen_lora_output"
+CACHE_DIR = "local_cache"
+
+
+def resolve_project_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
 
 
 # ==========================
@@ -37,6 +46,9 @@ def parse_args():
 
 
 def load_model(args):
+    args.cache_dir = str(resolve_project_path(args.cache_dir))
+    args.lora_path = str(resolve_project_path(args.lora_path))
+
     print(f"{Colors.SYS}⏳ 正在加载基础模型: {args.model_name} ...{Colors.RESET}")
 
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32

@@ -11,9 +11,9 @@
 
 ## 目录结构
 
-- train_qwen_lora.py：训练脚本（LoRA）
-- inference.py：交互式推理脚本（支持 Base/LoRA 切换）
-- compare.py：批量场景对比脚本
+- src/train_qwen_lora.py：训练脚本（LoRA）
+- src/inference.py：交互式推理脚本（支持 Base/LoRA 切换）
+- src/compare.py：批量场景对比脚本
 - qwen_lora_output/：LoRA 训练输出目录
 - samples/：示例图片与结果材料
 
@@ -32,11 +32,11 @@ pip install -r requirements.txt
 ### 1) 训练 LoRA
 
 ```bash
-python train_qwen_lora.py \
+python src/train_qwen_lora.py \
    --model_name Qwen/Qwen2.5-1.5B-Instruct \
    --data_path yahma/alpaca-cleaned \
-   --output_dir ./qwen_lora_output \
-   --cache_dir ./local_cache \
+   --output_dir qwen_lora_output \
+   --cache_dir local_cache \
    --epochs 3 \
    --batch_size 2 \
    --grad_accum 16 \
@@ -51,14 +51,15 @@ python train_qwen_lora.py \
 
 - Windows 下建议 `--num_proc 1 --num_workers 0`，稳定性更高。
 - 脚本会自动根据是否有 CUDA 选择精度与设备映射。
+- 相对路径参数会按项目根目录解析（不依赖当前终端所在目录）。
 
 ### 2) 交互推理
 
 ```bash
-python inference.py \
+python src/inference.py \
    --model_name Qwen/Qwen2.5-1.5B-Instruct \
-   --lora_path ./qwen_lora_output \
-   --cache_dir ./local_cache \
+   --lora_path qwen_lora_output \
+   --cache_dir local_cache \
    --max_new_tokens 512 \
    --temperature 0.7 \
    --top_p 0.9
@@ -79,10 +80,10 @@ python inference.py \
 ### 3) 批量对比
 
 ```bash
-python compare.py \
+python src/compare.py \
    --model_name Qwen/Qwen2.5-1.5B-Instruct \
-   --lora_path ./qwen_lora_output \
-   --cache_dir ./local_cache \
+   --lora_path qwen_lora_output \
+   --cache_dir local_cache \
    --max_new_tokens 256
 ```
 

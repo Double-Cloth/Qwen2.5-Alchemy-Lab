@@ -2,6 +2,8 @@ import os
 import sys
 import logging
 import argparse
+import inspect
+from pathlib import Path
 import torch
 from datasets import load_dataset
 from transformers import (
@@ -30,13 +32,23 @@ logging.basicConfig(
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_project_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Professional Qwen LoRA Training Script")
 
     # 路径配置
     parser.add_argument("--data_path", type=str, default="yahma/alpaca-cleaned", help="数据集")
-    parser.add_argument("--cache_dir", type=str, default="./local_cache", help="缓存目录")
-    parser.add_argument("--output_dir", type=str, default="./qwen_lora_output", help="输出目录")
+    parser.add_argument("--cache_dir", type=str, default="local_cache", help="缓存目录")
+    parser.add_argument("--output_dir", type=str, default="qwen_lora_output", help="输出目录")
 
     # 🔥 核心升级：默认使用 Qwen2.5-1.5B
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="基础模型")
@@ -64,14 +76,17 @@ def main():
     args = parse_args()
     set_seed(args.seed)
 
+    args.cache_dir = str(resolve_project_path(args.cache_dir))
+    args.output_dir = str(resolve_project_path(args.output_dir))
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"🚀 启动进阶训练流程，使用设备: {device}")
 
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    if not os.path.exists(args.cache_dir):
-        os.makedirs(args.cache_dir)
+    os.makedirs(args.cache_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # ==========================================
     # 2. 加载模型 (FP16 模式)
@@ -180,7 +195,7 @@ def main():
     # ==========================================
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=200,
         save_strategy="steps",
         save_steps=200,
@@ -201,19 +216,25 @@ def main():
         report_to="tensorboard",
         dataloader_num_workers=max(0, args.num_workers),
 
-        # ❌ 已删除：use_cache=False (它不应该在这里)
     )
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets["train"],
-        eval_dataset=tokenized_datasets["test"],
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": tokenized_datasets["train"],
+        "eval_dataset": tokenized_datasets["test"],
+        "data_collator": data_collator,
+    }
+
+    trainer_init_params = inspect.signature(Trainer.__init__).parameters
+    if "processing_class" in trainer_init_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    trainer = Trainer(**trainer_kwargs)
 
     logger.info("🔥 开始 LoRA 微调 Qwen...")
     trainer.train()
