@@ -1,2 +1,17 @@
 local_cache/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
 .venv/
+env.bak/
+venv.bak/
+
+# 其他常见忽略项
+*.log
+.DS_Store
+.idea/
+.vscode/
