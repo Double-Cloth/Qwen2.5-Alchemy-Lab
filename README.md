@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ## 快速开始
 
-### 1) 训练 LoRA
+### (1) 训练 LoRA
 
 ```bash
 python src/train_qwen_lora.py \
@@ -53,7 +53,7 @@ python src/train_qwen_lora.py \
 - 脚本会自动根据是否有 CUDA 选择精度与设备映射。
 - 相对路径参数会按项目根目录解析（不依赖当前终端所在目录）。
 
-### 2) 交互推理
+### (2) 交互推理
 
 ```bash
 python src/inference.py \
@@ -77,7 +77,7 @@ python src/inference.py \
 
 - 当 LoRA 目录不存在或加载失败时，脚本会自动降级为 Base 模式，不会崩溃。
 
-### 3) 批量对比
+### (3) 批量对比
 
 ```bash
 python src/compare.py \
